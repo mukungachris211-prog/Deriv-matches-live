@@ -1,0 +1,98 @@
+import os
+import json
+import time
+import threading
+from collections import deque
+from supabase import create_client
+from websocket import create_connection
+
+# Config
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SYMBOLS = ["R_10", "R_25", "R_50", "R_75", "R_100"]
+HISTORY = {sym: deque(maxlen=200) for sym in SYMBOLS}
+TICK_COUNTER = {sym: 0 for sym in SYMBOLS}
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_user_token(user_id: str):
+    try:
+        res = supabase.table("user_deriv_tokens").select("deriv_api_token").eq("user_id", user_id).execute()
+        return res.data[0]["deriv_api_token"] if res.data else None
+    except:
+        return None
+
+def save_signal(user_id, symbol, digit, gap, conf, valid_tick):
+    try:
+        supabase.table("matches_signals").insert({
+            "user_id": user_id,
+            "symbol": symbol,
+            "predicted_digit": digit,
+            "gap": gap,
+            "confidence": conf,
+            "valid_until_tick": valid_tick
+        }).execute()
+    except Exception as e:
+        print("DB error:", e)
+
+def analyze_and_stream(user_id: str):
+    api_token = get_user_token(user_id)
+    if not api_token:
+        print("❌ No API token for user", user_id)
+        return
+
+    last_signal = {s: 0 for s in SYMBOLS}
+    
+    try:
+        ws = create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089")
+        ws.send(json.dumps({"authorize": api_token}))
+        for s in SYMBOLS:
+            ws.send(json.dumps({"ticks": s, "subscribe": 1}))
+        print(f"✅ Connected for user {user_id}")
+        
+        while True:
+            data = json.loads(ws.recv())
+            if "tick" not in 
+                continue
+                
+            tick = data["tick"]
+            sym = tick["symbol"]
+            price = float(tick["quote"])
+            digit = int(str(price).split('.')[-1][-1])
+            
+            TICK_COUNTER[sym] += 1
+            HISTORY[sym].append(digit)
+            
+            # Analyze
+            digits = list(HISTORY[sym])
+            if len(digits) < 30:
+                continue
+                
+            last_seen = {}
+            for d in range(10):
+                try:
+                    last_seen[d] = len(digits) - 1 - digits[::-1].index(d)
+                except:
+                    last_seen[d] = len(digits)
+                    
+            best_d = max(range(10), key=lambda x: last_seen[x])
+            gap = last_seen[best_d]
+            
+            if gap > 18 and TICK_COUNTER[sym] > last_signal[sym] + 8:
+                conf = min(0.95, gap / 25.0)
+                valid = TICK_COUNTER[sym] + 3
+                save_signal(user_id, sym, best_d, gap, conf, valid)
+                last_signal[sym] = TICK_COUNTER[sym]
+                print(f"🎯 SIGNAL for {user_id}: {sym} → {best_d} (gap={gap})")
+                
+    except Exception as e:
+        print("🔁 Reconnect in 5s:", e)
+        time.sleep(5)
+        analyze_and_stream(user_id)
+
+# Start for your user ID (replace with your Supabase user ID)
+if __name__ == "__main__":
+    YOUR_USER_ID = os.getenv("YOUR_SUPABASE_USER_ID")  # Get this from Supabase Auth dashboard
+    if not YOUR_USER_ID:
+        print("❌ Set YOUR_SUPABASE_USER_ID in Fly.io secrets")
+    else:
+        analyze_and_stream(YOUR_USER_ID)
