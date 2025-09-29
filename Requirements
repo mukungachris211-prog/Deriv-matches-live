@@ -1,0 +1,5 @@
+websocket-client
+supabase
+python-dotenv
+fastapi
+uvicorn
